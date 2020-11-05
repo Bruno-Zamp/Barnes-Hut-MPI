@@ -30,7 +30,7 @@ void print_time(clock_t s, clock_t e);
 void display(void);
 
 //Calculates the positions of a time step
-void time_step(void);
+void time_step(int meurank, int procs);
 
 //If a particle moves beyond any of the boundaries then bounce it back
 void bounce(double *x, double *y, double *u, double *v);
@@ -49,6 +49,7 @@ double calculate_center_of_mass_y(struct node_t *node);
 
 //Functions for the force calculations
 void update_forces();
+void update_forces_parallel();
 void update_forces_help(int particle, struct node_t *node);
 void calculate_force(int particle, struct node_t *node, double r);
 

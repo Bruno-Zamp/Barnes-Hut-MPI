@@ -3,6 +3,7 @@
  * simulation with galaxy-like initial conditions.
  */
 #include "barnes_hut.h"
+#include <mpi.h>
 
 //Some constants and global variables
 int N = 2500;
@@ -102,45 +103,48 @@ void print_statistics(clock_t s, clock_t e,
 /*
  * Updates the positions of the particles of a time step.
  */
-void time_step(void) {
+void time_step(int meurank, int procs) {
   //Allocate memory for root
   root = malloc(sizeof(struct node_t));
-  set_node(root);
-  root->min_x = 0; root->max_x = 1; root->min_y = 0; root->max_y = 1;
   
-  //Put particles in tree
-  for(int i = 0; i < N; i++) {
-    put_particle_in_tree(i, root);
+  if (meurank == 0) {
+    set_node(root);
+    root->min_x = 0; root->max_x = 1; root->min_y = 0; root->max_y = 1;
+    //Put particles in tree
+    for(int i = 0; i < N; i++) {
+      put_particle_in_tree(i, root);
+    }
+    
+    //Calculate mass and center of mass
+    calculate_mass(root);
+    calculate_center_of_mass_x(root);
+    calculate_center_of_mass_y(root);
   }
-  
-  //Calculate mass and center of mass
-  calculate_mass(root);
-  calculate_center_of_mass_x(root);
-  calculate_center_of_mass_y(root);
-  
   //Calculate forces
-  update_forces();
-
+  update_forces_parallel(meurank, procs);
+  MPI_Barrier(MPI_COMM_WORLD);
   //Update velocities and positions
-  for(int i = 0; i < N; i++) {
-    double ax = force_x[i]/mass[i];
-    double ay = force_y[i]/mass[i];
-    u[i] += ax*dt;
-    v[i] += ay*dt;
-    x[i] += u[i]*dt;
-    y[i] += v[i]*dt;
+  if (meurank == 0) {
+    for(int i = 0; i < N; i++) {
+      double ax = force_x[i]/mass[i];
+      double ay = force_y[i]/mass[i];
+      u[i] += ax*dt;
+      v[i] += ay*dt;
+      x[i] += u[i]*dt;
+      y[i] += v[i]*dt;
 
-    /* This of course doesn't make any sense physically, 
-     * but makes sure that the particles stay within the
-     * bounds. Normally the particles won't leave the
-     * area anyway.
-     */
-    bounce(&x[i], &y[i], &u[i], &v[i]);
+      /* This of course doesn't make any sense physically, 
+      * but makes sure that the particles stay within the
+      * bounds. Normally the particles won't leave the
+      * area anyway.
+      */
+      bounce(&x[i], &y[i], &u[i], &v[i]);
+    }
+
+    //Free memory
+    free_node(root);
+    free(root);
   }
-
-  //Free memory
-  free_node(root);
-  free(root);
 }
 
 /*
@@ -326,6 +330,35 @@ void update_forces(){
   }
 }
 
+void update_forces_parallel(int meurank, int procs){
+  int ind=0, parte;
+  MPI_Status status;
+  
+  parte = (int)(N / (procs)); // valor corresponde a quantidade de partes que o vetor será dividido
+
+  if (meurank == 0) {
+      for(int i=1; i < procs; i++) {
+          ind = ind + parte; // incrementa partição do vetor
+          MPI_Send(&ind, 1, MPI_INT, i, ind + parte, MPI_COMM_WORLD);
+      }
+      printf("Proc. %d recebeu %d - %d\n", meurank, 0, parte);
+      for(int i = 0; i < parte; i++) {
+        force_x[i] = 0;
+        force_y[i] = 0;
+        update_forces_help(i, root);
+      }
+  }
+  else {
+    MPI_Recv(&ind, 1, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+    printf("Proc. %d recebeu %d - %d\n", meurank, ind, status.MPI_TAG);
+    for(int i = ind; i < status.MPI_TAG; i++) {
+      force_x[i] = 0;
+      force_y[i] = 0;
+      update_forces_help(i, root);
+    }
+  }
+}
+
 /*
  * Help function for calculating the forces recursively
  * using the Barnes Hut quad tree.
@@ -369,6 +402,10 @@ void calculate_force(int particle, struct node_t *node, double r){
  * Main function.
  */
 int main(int argc, char *argv[]) {  
+  int procs, meurank;
+  MPI_Init(&argc, &argv);
+  MPI_Comm_size(MPI_COMM_WORLD, &procs);
+  MPI_Comm_rank(MPI_COMM_WORLD, &meurank);
   //The second argument sets the number of time steps
   if (argc > 1) {
     time_steps = atoi(argv[1]);
@@ -390,32 +427,34 @@ int main(int argc, char *argv[]) {
 
   //The main loop
   for(int i = 0; i < time_steps; i++) {
-    time_step();
+    time_step(meurank, procs);
   }
 
   //Stop taking time
+  MPI_Barrier(MPI_COMM_WORLD);
   long stop = clock();
-
-  //Compute final statistics
-  double vu = 0;
-  double vv = 0;
-  double sumx = 0;
-  double sumy = 0;
-  double total_mass = 0;
-  for (int i = 0; i < N; i++){
-    sumx += mass[i]*x[i];
-    sumy += mass[i]*y[i];
-    vu += u[i];
-    vv += v[i];
-    total_mass += mass[i];
+  
+  if (meurank == 0) {
+    //Compute final statistics
+    double vu = 0;
+    double vv = 0;
+    double sumx = 0;
+    double sumy = 0;
+    double total_mass = 0;
+    for (int i = 0; i < N; i++){
+      sumx += mass[i]*x[i];
+      sumy += mass[i]*y[i];
+      vu += u[i];
+      vv += v[i];
+      total_mass += mass[i];
+    }
+    double cx = sumx/total_mass;
+    double cy = sumy/total_mass;
+  
+    print_statistics(start, stop, vu, vv, cx, cy);
+    //Free memory
+    free_case();
   }
-  double cx = sumx/total_mass;
-  double cy = sumy/total_mass;
-
-  print_statistics(start, stop, vu, vv, cx, cy);
-
-  //Free memory
-  free_case();
-
+  MPI_Finalize();
   return 0;
 } 
